@@ -3,12 +3,16 @@ package com.jonathanmackenzie;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.datavec.api.records.reader.RecordReader;
+import org.datavec.api.records.reader.impl.csv.CSVRecordReader;
 import org.datavec.api.records.reader.impl.csv.CSVSequenceRecordReader;
 import org.datavec.api.split.FileSplit;
 import org.datavec.api.transform.TransformProcess;
+import org.datavec.api.transform.analysis.DataAnalysis;
 import org.datavec.api.transform.schema.Schema;
 import org.datavec.api.transform.transform.time.DeriveColumnsFromTimeTransform;
 import org.datavec.api.writable.Writable;
+import org.datavec.spark.transform.AnalyzeSpark;
 import org.datavec.spark.transform.SparkTransformExecutor;
 import org.datavec.spark.transform.misc.StringToWritablesFunction;
 import org.datavec.spark.transform.misc.WritablesToStringFunction;
@@ -26,7 +30,15 @@ import org.deeplearning4j.nn.weights.WeightInit;
 import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
 import org.joda.time.DateTimeFieldType;
 import org.joda.time.DateTimeZone;
+import org.nd4j.linalg.api.ndarray.INDArray;
+import org.nd4j.linalg.dataset.SplitTestAndTrain;
+import org.nd4j.linalg.dataset.DataSet;
+import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
+import org.nd4j.linalg.dataset.api.preprocessor.DataNormalization;
+import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 //import org.slf4j.Logger;
 //import org.slf4j.LoggerFactory;
 
@@ -34,6 +46,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+
+import static org.reflections.Reflections.collect;
 
 
 public class Main {
@@ -52,35 +66,29 @@ public class Main {
         int nCharactersToSample = 300;				//Length of each sample to generate
         int numLabelClasses = 6;
         int nSteps = 1;
-        CSVSequenceRecordReader featureReader = new CSVSequenceRecordReader();
-        CSVSequenceRecordReader labelReader = new CSVSequenceRecordReader(nSteps);
-        try {
-            File infile = new File(args[0]);
-            featureReader.initialize(new FileSplit(infile));
-            labelReader.initialize(new FileSplit(infile));
-        } catch (IOException e) {
-            System.err.println("Could not find file "+e.getMessage());
-            return;
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-        List<String> labels = new ArrayList<>(6);
-        for (int i = 16; i <= 21; i++) {
-            labels.add(Integer.toString(i));
-        }
-        labelReader.setLabels(labels);
+        double splitPortion = 0.66 ;// 66% training data, 33% testing data
+//        CSVSequenceRecordReader featureReader = new CSVSequenceRecordReader();
+//        CSVSequenceRecordReader labelReader = new CSVSequenceRecordReader(nSteps);
+//        try {
+//            File infile = new File(args[0]);
+//            featureReader.initialize(new FileSplit(infile));
+//            labelReader.initialize(new FileSplit(infile));
+//        } catch (IOException e) {
+//            System.err.println("Could not find file "+e.getMessage());
+//            return;
+//        } catch (InterruptedException e) {
+//            e.printStackTrace();
+//        }
 
-        SequenceRecordReaderDataSetIterator iter = new SequenceRecordReaderDataSetIterator(
-                featureReader,
-                labelReader,
-                miniBatchSize,
-                numLabelClasses,
-                true,
-                SequenceRecordReaderDataSetIterator.AlignmentMode.ALIGN_END
-            );
+//        SequenceRecordReaderDataSetIterator iter = new SequenceRecordReaderDataSetIterator(
+//                featureReader,
+//                labelReader,
+//                miniBatchSize,
+//                numLabelClasses,
+//                true,
+//                SequenceRecordReaderDataSetIterator.AlignmentMode.EQUAL_LENGTH
+//            );
 
-        int numInputs = labelReader.getLabels().size();
-        int numOutputs = numInputs - 4; // we don't need the timestamp or derived as an output
 
 
         Schema inputDataSchema = new Schema.Builder()
@@ -103,8 +111,8 @@ public class Main {
                 .transform(new DeriveColumnsFromTimeTransform.Builder("timestamp")
                         .addIntegerDerivedColumn("dayOfWeek", DateTimeFieldType.dayOfWeek())
                         .build())
+                .
                 .build();
-
 
         Schema outputSchema = tp.getFinalSchema();
         System.out.println(outputSchema);
@@ -112,37 +120,41 @@ public class Main {
 
         SparkConf conf = new SparkConf();
         conf.setMaster("local[*]");
-        conf.setAppName("DataVec Example");
+
+        conf.setAppName("Traffic Predict");
 
         JavaSparkContext sc = new JavaSparkContext(conf);
-
-        JavaRDD<String> stringData = sc.textFile(args[0]);
+        sc.setLogLevel("ERROR");
+        JavaRDD<String> stringData = sc.textFile(new File(args[0]).getAbsolutePath());
+        RecordReader rr = new CSVRecordReader();
 
         //We first need to parse this format. It's comma-delimited (CSV) format, so let's parse it using CSVRecordReader:
-        JavaRDD<List<Writable>> parsedInputData = stringData.map(new StringToWritablesFunction(featureReader));
+        JavaRDD<List<Writable>> parsedInputData = stringData.map(new StringToWritablesFunction(rr));
 
         //Now, let's execute the transforms we defined earlier:
         SparkTransformExecutor exec = new SparkTransformExecutor();
         JavaRDD<List<Writable>> processedData = exec.execute(parsedInputData, tp);
+        processedData.cache();
+        long finalDataCount = processedData.count();
 
-        //For the sake of this example, let's collect the data locally and print it:
-        JavaRDD<String> processedAsString = processedData.map(new WritablesToStringFunction(","));
+        int numInputs = tp.getFinalSchema().getColumnNames().size();
+        int numOutputs = numInputs - 4; // we don't need the timestamp or derived as an output
 
-        List<String> processedCollected = processedAsString.collect();
-        List<String> inputDataCollected = stringData.collect();
+        System.out.println("DATA COUNT: "+finalDataCount);
+        List<List<Writable>> datalist = processedData.collect();
+        INDArray input  = Nd4j.zeros(numInputs, (int)finalDataCount);
+        INDArray labels = Nd4j.zeros(numInputs, (int)finalDataCount);
+        int rowCount = 0;
+        for(List<Writable> row : datalist) {
+           // input.putScalar(new int[]{row.to)});
+          //  labels.putScalar();
+        }
+        sc.stop();
 
-
-        System.out.println("\n\n---- Original Data ----");
-        for(String s : inputDataCollected) System.out.println(s);
-
-        System.out.println("\n\n---- Processed Data ----");
-        for(String s : processedCollected) System.out.println(s);
-
-
-//        tp.executeSequence(labelReader.sequenceRecord());
-//        tp.executeSequence(featureReader.sequenceRecord());
-
-
+        DataSet ds = new DataSet(input, labels);
+        SplitTestAndTrain splitTestAndTrain = ds.splitTestAndTrain(splitPortion);
+        DataSet train = splitTestAndTrain.getTrain();
+        DataSet test  = splitTestAndTrain.getTest();
 
 
         MultiLayerConfiguration netConf = new NeuralNetConfiguration.Builder()
@@ -154,11 +166,11 @@ public class Main {
                 .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT).iterations(1)
                 .updater(Updater.RMSPROP)
                     .list()
-                        .layer(0, new GravesLSTM.Builder().nIn(outputSchema.getColumnNames().size()).nOut(lstmLayerSize)
+                        .layer(0, new GravesLSTM.Builder().nIn(outputSchema.getColumnNames().size()).nOut(lstmLayerSize).name("input")
                                 .activation("tanh").build())
-                        .layer(1, new GravesLSTM.Builder().nIn(lstmLayerSize).nOut(lstmLayerSize)
+                        .layer(1, new GravesLSTM.Builder().nIn(lstmLayerSize).nOut(lstmLayerSize).name("hidden")
                                 .activation("tanh").build())
-                        .layer(2, new RnnOutputLayer.Builder(LossFunctions.LossFunction.MCXENT).activation("softmax")        //MCXENT + softmax for classification
+                        .layer(2, new RnnOutputLayer.Builder(LossFunctions.LossFunction.MCXENT).activation("softmax").name("output")        //MCXENT + softmax for classification
                                 .nIn(lstmLayerSize).nOut(numOutputs).build())
                 .backpropType(BackpropType.TruncatedBPTT)
                     .tBPTTForwardLength(tbpttLength)
@@ -171,20 +183,33 @@ public class Main {
         net.init();
         net.setListeners(new ScoreIterationListener(10));
 
-        int nEpochs = 30;
-        String str = "Test set evaluation at epoch %d: Accuracy = %.2f, F1 = %.2f";
-//        Logger log = LoggerFactory.getLogger("TrafficPredict");
 
-        for (int i = 0; i < nEpochs; i++) {
-            net.fit(iter);
+        net.fit(train);
+        net.evaluate(test.iterateWithMiniBatches());
+//        System.out.println("Executing tp");
+////         tp.execute(labelReader.next());
+//        SplitTestAndTrain testAndTrain = ds.splitTestAndTrain(0.65);
+//        DataSet testing = testAndTrain.getTest();
+//        DataSet training = testAndTrain.getTrain();
+
+
+
+//        int nEpochs = 30;
+//        String str = "Test set evaluation at epoch %d: Accuracy = %.2f, F1 = %.2f";
+//        Logger log = LoggerFactory.getLogger("TrafficPredict");
+//
+//        net.fit(training);
+        //Evaluation eval = Evaluation.evalTimeSeries();
+//        for (int i = 0; i < nEpochs; i++) {
+//            net.fit(testing);
 
             //Evaluate on the test set:
-            Evaluation evaluation = net.evaluate(iter);
+//            Evaluation evaluation = net.evaluate(iter);
 //            log.info(String.format(str, i, evaluation.accuracy(), evaluation.f1()));
-
-
-            iter.reset();
-        }
+//
+//
+//            iter.reset();
+//        }
 
 //        log.info("----- Finished -----");
 
