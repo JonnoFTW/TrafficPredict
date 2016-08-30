@@ -48,13 +48,14 @@ public class Main {
         int miniBatchSize = 32;						//Size of mini batch to use when  training
         int exampleLength = 1000;					//Length of each training example sequence to use. This could certainly be increased
         int tbpttLength = 75;                       //Length for truncated backpropagation through time. i.e., do parameter updates ever 50 characters
-        int numEpochs = 1;							//Total number of training epochs
+        int numEpochs = 10;							//Total number of training epochs
         int generateSamplesEveryNMinibatches = 10;  //How frequently to generate samples from the network? 1000 characters /
                                                     // 50 tbptt length: 20 parameter updates per minibatch
         int nSamplesToGenerate = 4;					//Number of samples to generate after each training epoch
         int nCharactersToSample = 300;				//Length of each sample to generate
         int numLabelClasses = 6;
-        int nSteps = 1;
+        int nSteps = 2;
+        int labelIdx = 4;
         double splitPortion = 0.66 ;// 66% training data, 33% testing data
 
 
@@ -104,7 +105,7 @@ public class Main {
         long finalDataCount = processedData.count();
 
         int numInputs = tp.getFinalSchema().getColumnNames().size();
-        int numOutputs = numInputs - 4; // we don't need the timestamp or derived as an output
+        int numOutputs = numInputs - labelIdx; // we don't need the timestamp or derived as an output
 
         List<List<Writable>> datalist = processedData.collect();
         INDArray input  = Nd4j.zeros((int)finalDataCount - nSteps, numInputs, 'c');
@@ -123,7 +124,7 @@ public class Main {
                 inputData[i] = row.get(i).toDouble();
             }
             for (int i = 0; i < labelData.length; i++) {
-                labelData[i] = labelRow.get(i+4).toDouble();
+                labelData[i] = labelRow.get(i+labelIdx).toDouble();
             }
 
             input.putRow(rowCount, Nd4j.create(inputData));
@@ -152,7 +153,7 @@ public class Main {
                                 .activation("tanh").build())
                         .layer(1, new GravesLSTM.Builder().nIn(lstmLayerSize).nOut(lstmLayerSize).name("hidden")
                                 .activation("tanh").build())
-                        .layer(2, new RnnOutputLayer.Builder(LossFunctions.LossFunction.MCXENT).activation("softmax").name("output")        //MCXENT + softmax for classification
+                        .layer(2, new RnnOutputLayer.Builder(LossFunctions.LossFunction.MSE).activation("identity").name("output")
                                 .nIn(lstmLayerSize).nOut(numOutputs).build())
                 .backpropType(BackpropType.TruncatedBPTT)
                     .tBPTTForwardLength(tbpttLength)
@@ -165,16 +166,21 @@ public class Main {
         net.init();
         net.setListeners(new ScoreIterationListener(10));
 
-        System.out.println("------ TRAINING -----");
-        net.fit(train);
-        System.out.println("------ EVALUATING -----");
-
         Evaluation eval = new Evaluation();
-        DataSet tenTest = test.get(10);
-        for(DataSet d : tenTest) {
-            INDArray out = net.output(d.getFeatures());
-            eval.evalTimeSeries(d.getLabels(), out);
+        for(int i =0; i < numEpochs; i++) {
+            System.out.println("------ TRAINING -----");
+            net.fit(train);
+            System.out.println("------ EVALUATING -----");
+
+            INDArray out = net.output(test.getFeatures());
+            int[] shape = test.getLabels().shape();
+
+            eval.evalTimeSeries(test.getLabels().reshape(shape[0], shape[1], 1), out);
+//        System.out.println("Predictions: "+out);
+//        System.out.println("Expected:    "+test.getLabels());
+
             System.out.println(eval.stats());
+
         }
 
 //;        INDArray output = net.output(test.getFeatureMatrix());
