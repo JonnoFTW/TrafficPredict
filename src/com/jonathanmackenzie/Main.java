@@ -5,18 +5,12 @@ import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.datavec.api.records.reader.RecordReader;
 import org.datavec.api.records.reader.impl.csv.CSVRecordReader;
-import org.datavec.api.records.reader.impl.csv.CSVSequenceRecordReader;
-import org.datavec.api.split.FileSplit;
 import org.datavec.api.transform.TransformProcess;
-import org.datavec.api.transform.analysis.DataAnalysis;
 import org.datavec.api.transform.schema.Schema;
 import org.datavec.api.transform.transform.time.DeriveColumnsFromTimeTransform;
 import org.datavec.api.writable.Writable;
-import org.datavec.spark.transform.AnalyzeSpark;
 import org.datavec.spark.transform.SparkTransformExecutor;
 import org.datavec.spark.transform.misc.StringToWritablesFunction;
-import org.datavec.spark.transform.misc.WritablesToStringFunction;
-import org.deeplearning4j.datasets.datavec.SequenceRecordReaderDataSetIterator;
 import org.deeplearning4j.eval.Evaluation;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.BackpropType;
@@ -31,27 +25,22 @@ import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
 import org.joda.time.DateTimeFieldType;
 import org.joda.time.DateTimeZone;
 import org.nd4j.linalg.api.ndarray.INDArray;
-import org.nd4j.linalg.dataset.SplitTestAndTrain;
 import org.nd4j.linalg.dataset.DataSet;
-import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
-import org.nd4j.linalg.dataset.api.preprocessor.DataNormalization;
+import org.nd4j.linalg.dataset.SplitTestAndTrain;
 import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-//import org.slf4j.Logger;
-//import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.IOException;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
-import static org.reflections.Reflections.collect;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 
 public class Main {
-
+    private static final Logger log = LoggerFactory.getLogger(Main.class);
     public static void main(String[] args) {
 	// write your code here
 
@@ -67,28 +56,6 @@ public class Main {
         int numLabelClasses = 6;
         int nSteps = 1;
         double splitPortion = 0.66 ;// 66% training data, 33% testing data
-//        CSVSequenceRecordReader featureReader = new CSVSequenceRecordReader();
-//        CSVSequenceRecordReader labelReader = new CSVSequenceRecordReader(nSteps);
-//        try {
-//            File infile = new File(args[0]);
-//            featureReader.initialize(new FileSplit(infile));
-//            labelReader.initialize(new FileSplit(infile));
-//        } catch (IOException e) {
-//            System.err.println("Could not find file "+e.getMessage());
-//            return;
-//        } catch (InterruptedException e) {
-//            e.printStackTrace();
-//        }
-
-//        SequenceRecordReaderDataSetIterator iter = new SequenceRecordReaderDataSetIterator(
-//                featureReader,
-//                labelReader,
-//                miniBatchSize,
-//                numLabelClasses,
-//                true,
-//                SequenceRecordReaderDataSetIterator.AlignmentMode.EQUAL_LENGTH
-//            );
-
 
 
         Schema inputDataSchema = new Schema.Builder()
@@ -111,7 +78,6 @@ public class Main {
                 .transform(new DeriveColumnsFromTimeTransform.Builder("timestamp")
                         .addIntegerDerivedColumn("dayOfWeek", DateTimeFieldType.dayOfWeek())
                         .build())
-                .
                 .build();
 
         Schema outputSchema = tp.getFinalSchema();
@@ -140,18 +106,34 @@ public class Main {
         int numInputs = tp.getFinalSchema().getColumnNames().size();
         int numOutputs = numInputs - 4; // we don't need the timestamp or derived as an output
 
-        System.out.println("DATA COUNT: "+finalDataCount);
         List<List<Writable>> datalist = processedData.collect();
-        INDArray input  = Nd4j.zeros(numInputs, (int)finalDataCount);
-        INDArray labels = Nd4j.zeros(numInputs, (int)finalDataCount);
+        INDArray input  = Nd4j.zeros((int)finalDataCount - nSteps, numInputs, 'c');
+        INDArray labels = Nd4j.zeros((int)finalDataCount - nSteps, numOutputs, 'c');
         int rowCount = 0;
         for(List<Writable> row : datalist) {
-           // input.putScalar(new int[]{row.to)});
-          //  labels.putScalar();
+            double[] inputData = new double[row.size()];
+            double[] labelData = new double[numOutputs];
+            List<Writable> labelRow;
+            try {
+                labelRow = datalist.get(rowCount + nSteps);
+            } catch (IndexOutOfBoundsException e) {
+                break;
+            }
+            for (int i = 0; i < inputData.length; i++) {
+                inputData[i] = row.get(i).toDouble();
+            }
+            for (int i = 0; i < labelData.length; i++) {
+                labelData[i] = labelRow.get(i+4).toDouble();
+            }
+
+            input.putRow(rowCount, Nd4j.create(inputData));
+            labels.putRow(rowCount, Nd4j.create(labelData));
+            rowCount++;
         }
         sc.stop();
 
         DataSet ds = new DataSet(input, labels);
+        ds.setLabelNames(Arrays.asList("16,17,18,19,20,21".split(",")));
         SplitTestAndTrain splitTestAndTrain = ds.splitTestAndTrain(splitPortion);
         DataSet train = splitTestAndTrain.getTrain();
         DataSet test  = splitTestAndTrain.getTest();
@@ -183,34 +165,36 @@ public class Main {
         net.init();
         net.setListeners(new ScoreIterationListener(10));
 
-
+        System.out.println("------ TRAINING -----");
         net.fit(train);
-        net.evaluate(test.iterateWithMiniBatches());
-//        System.out.println("Executing tp");
-////         tp.execute(labelReader.next());
-//        SplitTestAndTrain testAndTrain = ds.splitTestAndTrain(0.65);
-//        DataSet testing = testAndTrain.getTest();
-//        DataSet training = testAndTrain.getTrain();
+        System.out.println("------ EVALUATING -----");
 
+        Evaluation eval = new Evaluation();
+        DataSet tenTest = test.get(10);
+        for(DataSet d : tenTest) {
+            INDArray out = net.output(d.getFeatures());
+            eval.evalTimeSeries(d.getLabels(), out);
+            System.out.println(eval.stats());
+        }
 
-
+//;        INDArray output = net.output(test.getFeatureMatrix());
+//        eval.evalTimeSeries(test.getFeatures(), output );
+//        System.out.println(eval.stats());
+//        test.get(10);
+//
 //        int nEpochs = 30;
 //        String str = "Test set evaluation at epoch %d: Accuracy = %.2f, F1 = %.2f";
 //        Logger log = LoggerFactory.getLogger("TrafficPredict");
 //
-//        net.fit(training);
-        //Evaluation eval = Evaluation.evalTimeSeries();
 //        for (int i = 0; i < nEpochs; i++) {
-//            net.fit(testing);
-
-            //Evaluate on the test set:
-//            Evaluation evaluation = net.evaluate(iter);
+//            net.fit(train);
+//
+//            // Evaluate on the test set:
+//            Evaluation evaluation = net.evaluate(test);
 //            log.info(String.format(str, i, evaluation.accuracy(), evaluation.f1()));
 //
-//
-//            iter.reset();
 //        }
-
+//
 //        log.info("----- Finished -----");
 
     }
